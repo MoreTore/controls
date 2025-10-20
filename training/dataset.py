@@ -32,7 +32,7 @@ class LataccelTokenizer:
 class TinyPhysicsDatasetConfig:
   context: int = 20
   tokenizer: LataccelTokenizer = field(default_factory=LataccelTokenizer)
-  normalize_states: bool = True
+  normalize_states: bool = False
   state_mean: Optional[np.ndarray] = None
   state_std: Optional[np.ndarray] = None
   target_mean: Optional[float] = None
@@ -74,8 +74,8 @@ class TinyPhysicsDataset(Dataset):
       v_ego = frame["vEgo"].to_numpy(dtype=np.float32)
       a_ego = frame["aEgo"].to_numpy(dtype=np.float32)
       states = np.stack([steer_action, road_lataccel, v_ego, a_ego], axis=1)
-      target_lataccel = frame["targetLateralAcceleration"].to_numpy(dtype=np.float32)
-      tokens = self.config.tokenizer.encode(target_lataccel).astype(np.int64)
+      actual_lataccel = frame["actualLateralAcceleration"].to_numpy(dtype=np.float32)
+      tokens = self.config.tokenizer.encode(actual_lataccel).astype(np.int64)
       times = frame["t"].to_numpy(dtype=np.float32)
 
       batch_count = states.shape[0]
@@ -92,8 +92,8 @@ class TinyPhysicsDataset(Dataset):
         self.state_m2 += batch_var * batch_count + (delta ** 2) * (self.state_count * batch_count / total)
       self.state_count = total
 
-      target_batch_mean = float(target_lataccel.mean())
-      target_batch_var = float(target_lataccel.var())
+      target_batch_mean = float(actual_lataccel.mean())
+      target_batch_var = float(actual_lataccel.var())
       target_delta = target_batch_mean - self.target_mean
       target_total = self.target_count + batch_count
       if target_total > 0:
@@ -104,7 +104,7 @@ class TinyPhysicsDataset(Dataset):
       segment_data = {
         "states": states,
         "tokens": tokens,
-        "targets": target_lataccel,
+        "targets": actual_lataccel,
         "times": times,
         "route": segment.route,
         "segment": segment.segment_index,
