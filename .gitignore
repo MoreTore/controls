@@ -3,3 +3,4 @@ data/
 report.html
 models/tinyphysics_*.onnx
 *.swp
+training_runs/
