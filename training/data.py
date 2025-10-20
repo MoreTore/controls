@@ -14,7 +14,7 @@ from openpilot.tools.lib.logreader import LogReader, ReadMode
 
 ACC_G = 9.81
 SEGMENT_LENGTH_NS = int(60 * 1e9)  # one minute per segment
-CSV_COLUMNS = ("t", "vEgo", "aEgo", "roll", "targetLateralAcceleration", "steerCommand")
+CSV_COLUMNS = ("t", "vEgo", "aEgo", "roll", "targetLateralAcceleration", "steerCommand", "actualLateralAcceleration")
 MIN_SEGMENT_ROWS = 200
 
 
@@ -90,6 +90,7 @@ class TinyPhysicsLogExtractor:
       "roll": _Signal(),
       "steer_command": _Signal(),
       "target_lataccel": _Signal(),
+      "actual_lataccel": _Signal(),
       "torque_active": _Signal(),
       "steering_pressed": _Signal(),
     }
@@ -170,6 +171,7 @@ class TinyPhysicsLogExtractor:
             "roll": float(buffers["roll"].value),
             "targetLateralAcceleration": float(buffers["target_lataccel"].value),
             "steerCommand": float(buffers["steer_command"].value),
+            "actualLateralAcceleration": float(buffers["actual_lataccel"].value),
           })
 
       elif which == "carControl":
@@ -188,8 +190,11 @@ class TinyPhysicsLogExtractor:
         lateral_state = getattr(lateral_state_union, state_name)
         if hasattr(lateral_state, "desiredLateralAccel"):
           buffers["target_lataccel"].update(float(lateral_state.desiredLateralAccel), msg_time)
-        if state_name == "torqueState" and hasattr(lateral_state, "active"):
-          buffers["torque_active"].update(float(lateral_state.active), msg_time)
+        if state_name == "torqueState":
+          if hasattr(lateral_state, "active"):
+            buffers["torque_active"].update(float(lateral_state.active), msg_time)
+          if hasattr(lateral_state, "actualLateralAccel"):
+            buffers["actual_lataccel"].update(float(lateral_state.actualLateralAccel), msg_time)
 
       elif which == "liveLocationKalman":
         orientation = msg.liveLocationKalman.orientationNED
@@ -213,7 +218,7 @@ class TinyPhysicsLogExtractor:
     return segments
 
   def _signals_ready(self, buffers: dict[str, _Signal], current_time: float) -> bool:
-    required_keys = ("v_ego", "a_ego", "roll", "steer_command", "target_lataccel", "torque_active", "steering_pressed")
+    required_keys = ("v_ego", "a_ego", "roll", "steer_command", "target_lataccel", "actual_lataccel", "torque_active", "steering_pressed")
     return all(buffers[key].fresh(current_time, self.max_signal_age) for key in required_keys)
 
 
@@ -245,12 +250,15 @@ def load_samples(input_path: str) -> List[SegmentSamples]:
     for entry in entries:
       stem = entry["id"]
       frame = pd.read_csv(input_dir / f"{stem}.csv")
+      if "actualLateralAcceleration" not in frame.columns:
+        continue
       segments.append(SegmentSamples(
         route=entry["route"],
         segment_index=int(entry["segment_index"]),
         frame=frame,
       ))
-    return segments
+    if segments:
+      return segments
 
   # Fallback: assume directory contains standalone CSV segments (no metadata)
   csv_files = sorted(input_dir.glob("*.csv"))
@@ -259,10 +267,15 @@ def load_samples(input_path: str) -> List[SegmentSamples]:
 
   for csv_path in csv_files:
     frame = pd.read_csv(csv_path)
+    if "actualLateralAcceleration" not in frame.columns:
+      continue
     segments.append(SegmentSamples(
       route=csv_path.stem,
       segment_index=0,
       frame=frame,
     ))
+
+  if not segments:
+    raise FileNotFoundError(f"No segment CSV files found in {input_dir}")
 
   return segments
