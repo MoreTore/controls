@@ -14,11 +14,17 @@ from .dataset import VOCAB_SIZE
 class TinyPhysicsModelConfig:
   state_dim: int
   context: int
-  hidden_size: int = 192
-  num_layers: int = 2
+  hidden_size: int = 512
+  num_layers: int = 3
   dropout: float = 0.1
-  token_embed_dim: int = 32
+  token_embed_dim: int = 64
   vocab_size: int = VOCAB_SIZE
+  head_hidden: int = 512
+  head_layers: int = 3
+  state_mean: Tuple[float, ...] | None = None
+  state_std: Tuple[float, ...] | None = None
+  target_mean: float | None = None
+  target_std: float | None = None
 
 
 class TinyPhysicsNet(nn.Module):
@@ -37,6 +43,15 @@ class TinyPhysicsNet(nn.Module):
     self.config = config
 
     self.token_embedding = nn.Embedding(self.config.vocab_size, self.config.token_embed_dim)
+    if self.config.state_mean is not None and self.config.state_std is not None:
+      state_mean = torch.tensor(self.config.state_mean, dtype=torch.float32)
+      state_std = torch.tensor(self.config.state_std, dtype=torch.float32)
+      state_std = torch.clamp(state_std, min=1e-6)
+    else:
+      state_mean = torch.zeros(self.config.state_dim, dtype=torch.float32)
+      state_std = torch.ones(self.config.state_dim, dtype=torch.float32)
+    self.register_buffer("state_mean", state_mean.view(1, 1, -1))
+    self.register_buffer("state_std", state_std.view(1, 1, -1))
 
     encoder_input_dim = self.config.state_dim + self.config.token_embed_dim
     gru_dropout = self.config.dropout if self.config.num_layers > 1 else 0.0
@@ -47,15 +62,22 @@ class TinyPhysicsNet(nn.Module):
       batch_first=True,
       dropout=gru_dropout,
     )
-    self.head = nn.Sequential(
-      nn.LayerNorm(self.config.hidden_size),
-      nn.GELU(),
-      nn.Linear(self.config.hidden_size, self.config.hidden_size),
-      nn.GELU(),
-      nn.Linear(self.config.hidden_size, self.config.vocab_size),
-    )
+    head_layers: list[nn.Module] = [nn.LayerNorm(self.config.hidden_size)]
+    input_dim = self.config.hidden_size
+    for _ in range(max(1, self.config.head_layers)):
+      head_layers.extend([
+        nn.Linear(input_dim, self.config.head_hidden),
+        nn.GELU(),
+        nn.Dropout(self.config.dropout),
+      ])
+      input_dim = self.config.head_hidden
+    head_layers.append(nn.Linear(input_dim, self.config.vocab_size))
+    self.head = nn.Sequential(*head_layers)
 
   def forward(self, states: torch.Tensor, tokens: torch.Tensor) -> torch.Tensor:
+    if self.state_mean is not None and self.state_std is not None:
+      states = (states - self.state_mean) / self.state_std
+
     token_features = self.token_embedding(tokens)
     encoder_in = torch.cat([states, token_features], dim=-1)
     encoded, _ = self.encoder(encoder_in)
