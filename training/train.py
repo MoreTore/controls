@@ -18,9 +18,9 @@ from tqdm import tqdm
 from openpilot.tools.lib.api import APIError, CommaApi, UnauthorizedError
 from openpilot.tools.lib.auth_config import get_token
 
-from .data import SegmentSamples, SegmentWriter, TinyPhysicsLogExtractor, load_samples
-from .dataset import TinyPhysicsDataset, TinyPhysicsDatasetConfig, train_val_split
-from .model import TinyPhysicsModelConfig, TinyPhysicsNet, export_to_onnx
+from controls_challenge.training.data import SegmentSamples, SegmentWriter, TinyPhysicsLogExtractor, load_samples
+from controls_challenge.training.dataset import TinyPhysicsDataset, TinyPhysicsDatasetConfig, train_val_split
+from controls_challenge.training.model import TinyPhysicsModelConfig, TinyPhysicsNet, export_to_onnx
 
 
 def generate_debug_report(segments: List[SegmentSamples], report_path: Path, max_segments: int = 100) -> None:
@@ -75,7 +75,7 @@ def generate_debug_report(segments: List[SegmentSamples], report_path: Path, max
     fig.savefig(buffer, format="png", dpi=120)
     plt.close(fig)
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
-    html_lines.append(f"<figure><h2>Segment {idx:05d} | Route: {segment.route} | Index: {segment.segment_index}</h2>")
+    html_lines.append(f"<figure><h2>Segment {idx:05d} | Route: {segment.route}/{segment.segment_index}</h2>")
     html_lines.append(f"<img src='data:image/png;base64,{encoded}' alt='Segment {idx:05d} plot' style='width:100%;height:auto;'/>")
     html_lines.append("</figure>")
 

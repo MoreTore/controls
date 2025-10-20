@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from .data import SegmentSamples
+from controls_challenge.training.data import SegmentSamples
 
 ACC_G = 9.81
 LATACCEL_RANGE = (-5.0, 5.0)

@@ -7,7 +7,7 @@ from typing import Tuple
 import torch
 import torch.nn as nn
 
-from .dataset import VOCAB_SIZE
+from controls_challenge.training.dataset import VOCAB_SIZE
 
 
 @dataclass(slots=True)
