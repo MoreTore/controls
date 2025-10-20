@@ -24,6 +24,7 @@ openpilot logs and train a TinyPhysics surrogate model that is compatible with
      --routes-limit 50 \
      --samples-path controls_challenge/data/tinyphysics_segments \
      --write-samples \
+     --debug \
      --extract-threads 4 \
      --export-onnx \
      --onnx-path controls_challenge/models/tinyphysics_trained.onnx \
@@ -48,6 +49,9 @@ The command above will:
 - Provide multiple `--dongle-id` flags to merge data from several devices.
 - Set `--routes-limit 0` to fetch every available route for each dongle.
 - Increase `--extract-threads` to parallelize data extraction and writing.
+- Adjust `--label-smoothing`, `--regression-weight`, and scheduler arguments to
+  tune optimization for your data volume.
+- Enable `--debug` to produce an HTML report visualizing each extracted segment.
 
 The default artefacts are stored under `controls_challenge/training_runs/tinyphysics`.
 You can point `--onnx-path` at `controls_challenge/models/` to swap in your newly
