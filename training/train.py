@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import numpy as np
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 from pathlib import Path
 from typing import Dict, List, Optional
-from dataclasses import asdict
 
 import torch
 import torch.nn.functional as F
@@ -20,6 +21,66 @@ from openpilot.tools.lib.auth_config import get_token
 from .data import SegmentSamples, SegmentWriter, TinyPhysicsLogExtractor, load_samples
 from .dataset import TinyPhysicsDataset, TinyPhysicsDatasetConfig, train_val_split
 from .model import TinyPhysicsModelConfig, TinyPhysicsNet, export_to_onnx
+
+
+def generate_debug_report(segments: List[SegmentSamples], report_path: Path, max_segments: int = 100) -> None:
+  if not segments:
+    return
+
+  report_path.parent.mkdir(parents=True, exist_ok=True)
+  html_lines = [
+    "<html><head><meta charset='utf-8'><title>TinyPhysics Segment Debug Report</title>",
+    "<style>body{font-family:Arial,sans-serif;background:#f7f7f7;color:#222;}h2{margin-top:40px;}figure{background:#fff;padding:12px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.1);}</style>",
+    "</head><body><h1>TinyPhysics Segment Diagnostics</h1>",
+    f"<p>Segments plotted: {min(len(segments), max_segments)} / {len(segments)}</p>",
+  ]
+
+  from io import BytesIO
+  import base64
+  import matplotlib.pyplot as plt
+
+  for idx, segment in enumerate(segments[:max_segments]):
+    frame = segment.frame
+    if frame.empty:
+      continue
+    t = frame["t"].to_numpy()
+    target = frame["targetLateralAcceleration"].to_numpy()
+    actual = frame.get("actualLateralAcceleration", target).to_numpy()
+    steer = frame["steerCommand"].to_numpy()
+    v_ego = frame["vEgo"].to_numpy()
+    roll = frame["roll"].to_numpy()
+
+    fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
+    axes[0].plot(t, target, label="Target Lat Accel", color="#1f77b4")
+    axes[0].plot(t, actual, label="Actual Lat Accel", color="#ff7f0e", alpha=0.8)
+    axes[0].set_ylabel("m/s²")
+    axes[0].legend(loc="upper right")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(t, steer, color="#2ca02c")
+    axes[1].set_ylabel("Steer Cmd")
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(t, v_ego, color="#d62728")
+    axes[2].set_ylabel("vEgo (m/s)")
+    axes[2].grid(True, alpha=0.3)
+
+    axes[3].plot(t, roll, color="#9467bd")
+    axes[3].set_ylabel("Roll (rad)")
+    axes[3].set_xlabel("Time (s)")
+    axes[3].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    buffer = BytesIO()
+    fig.savefig(buffer, format="png", dpi=120)
+    plt.close(fig)
+    encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+    html_lines.append(f"<figure><h2>Segment {idx:05d} | Route: {segment.route} | Index: {segment.segment_index}</h2>")
+    html_lines.append(f"<img src='data:image/png;base64,{encoded}' alt='Segment {idx:05d} plot' style='width:100%;height:auto;'/>")
+    html_lines.append("</figure>")
+
+  html_lines.append("</body></html>")
+  report_path.write_text("\n".join(html_lines), encoding="utf-8")
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,16 +98,21 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--batch-size", type=int, default=256)
   parser.add_argument("--epochs", type=int, default=10)
   parser.add_argument("--lr", type=float, default=3e-4)
+  parser.add_argument("--min-lr", type=float, default=3e-5)
+  parser.add_argument("--scheduler-warmup", type=int, default=2, help="Number of warmup epochs before cosine decay.")
   parser.add_argument("--weight-decay", type=float, default=1e-4)
   parser.add_argument("--grad-clip", type=float, default=1.0)
   parser.add_argument("--val-pct", type=float, default=0.2, help="Validation split by route.")
   parser.add_argument("--num-workers", type=int, default=0)
   parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
-  parser.add_argument("--output-dir", type=str, default="controls_challenge/training_runs/tinyphysics")
+  parser.add_argument("--output-dir", type=str, default="./training_runs/tinyphysics")
   parser.add_argument("--export-onnx", action="store_true", help="Export the trained model to ONNX.")
-  parser.add_argument("--onnx-path", type=str, default="controls_challenge/models/tinyphysics_trained.onnx")
+  parser.add_argument("--onnx-path", type=str, default="./models/tinyphysics_trained.onnx")
   parser.add_argument("--onnx-opset", type=int, default=18, help="ONNX opset version to target (>=18 recommended).")
   parser.add_argument("--seed", type=int, default=2024)
+  parser.add_argument("--debug", action="store_true", help="Generate an HTML report plotting each extracted segment.")
+  parser.add_argument("--label-smoothing", type=float, default=0.05)
+  parser.add_argument("--regression-weight", type=float, default=0.3, help="Weight for auxiliary regression loss.")
   return parser.parse_args()
 
 
@@ -143,6 +209,10 @@ def train_epoch(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     grad_clip: float,
+    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    token_centers: torch.Tensor,
+    regression_weight: float,
+    label_smoothing: float,
 ) -> Dict[str, float]:
   model.train()
   total_loss = 0.0
@@ -157,11 +227,20 @@ def train_epoch(
 
     optimizer.zero_grad(set_to_none=True)
     logits = model(states, tokens)
-    loss = F.cross_entropy(logits, targets)
+    ce_loss = F.cross_entropy(logits, targets, label_smoothing=label_smoothing)
+    if regression_weight > 0.0:
+      probs = F.softmax(logits, dim=-1)
+      expected_lataccel = torch.sum(probs * token_centers, dim=-1)
+      regression_loss = F.mse_loss(expected_lataccel, batch["target_lataccel"].to(device))
+      loss = ce_loss + regression_weight * regression_loss
+    else:
+      loss = ce_loss
     loss.backward()
     if grad_clip > 0:
       torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
     optimizer.step()
+    if scheduler is not None:
+      scheduler.step()
 
     total_loss += loss.item() * len(states)
     total_correct += (logits.argmax(dim=-1) == targets).sum().item()
@@ -173,7 +252,13 @@ def train_epoch(
 
 
 @torch.no_grad()
-def evaluate_epoch(model: TinyPhysicsNet, loader: DataLoader, device: torch.device) -> Dict[str, float]:
+def evaluate_epoch(
+    model: TinyPhysicsNet,
+    loader: DataLoader,
+    device: torch.device,
+    token_centers: Optional[torch.Tensor] = None,
+    regression_weight: float = 0.0,
+) -> Dict[str, float]:
   model.eval()
   total_loss = 0.0
   total_correct = 0
@@ -186,7 +271,14 @@ def evaluate_epoch(model: TinyPhysicsNet, loader: DataLoader, device: torch.devi
     targets = batch["target_token"].to(device)
 
     logits = model(states, tokens)
-    loss = F.cross_entropy(logits, targets)
+    ce_loss = F.cross_entropy(logits, targets)
+    if token_centers is not None and regression_weight > 0.0:
+      probs = F.softmax(logits, dim=-1)
+      expected_lataccel = torch.sum(probs * token_centers, dim=-1)
+      regression_loss = F.mse_loss(expected_lataccel, batch["target_lataccel"].to(device))
+      loss = ce_loss + regression_weight * regression_loss
+    else:
+      loss = ce_loss
 
     total_loss += loss.item() * len(states)
     total_correct += (logits.argmax(dim=-1) == targets).sum().item()
@@ -266,7 +358,13 @@ def main() -> None:
   if not samples:
     raise RuntimeError("No samples were extracted from the provided routes.")
 
-  dataset_cfg = TinyPhysicsDatasetConfig(context=args.context)
+  if args.debug:
+    report_base = samples_path if samples_path else output_dir / "debug_reports"
+    report_path = Path(report_base) / "segments_debug.html"
+    generate_debug_report(samples, report_path)
+    print(f"Debug report written to {report_path}")
+
+  dataset_cfg = TinyPhysicsDatasetConfig(context=args.context, normalize_states=False)
   train_segments, val_segments = train_val_split(samples, val_pct=args.val_pct)
   if not train_segments:
     raise RuntimeError("Training split is empty; ensure routes were extracted correctly.")
@@ -279,12 +377,14 @@ def main() -> None:
     f"state_std: {train_dataset.state_std.tolist()} | target_std: {train_dataset.target_std:.4f}"
   )
 
+  token_centers = torch.from_numpy(train_dataset.config.tokenizer.bins.astype(np.float32)).to(device).view(1, -1)
+
   val_loader: Optional[DataLoader] = None
   if val_segments:
     val_cfg = TinyPhysicsDatasetConfig(
       context=dataset_cfg.context,
       tokenizer=dataset_cfg.tokenizer,
-      normalize_states=dataset_cfg.normalize_states,
+      normalize_states=False,
       state_mean=train_dataset.state_mean,
       state_std=train_dataset.state_std,
       target_mean=train_dataset.target_mean,
@@ -298,10 +398,25 @@ def main() -> None:
     state_dim=state_dim,
     context=dataset_cfg.context,
     vocab_size=dataset_cfg.tokenizer.vocab_size,
+    state_mean=tuple(float(x) for x in train_dataset.state_mean.tolist()),
+    state_std=tuple(float(x) for x in train_dataset.state_std.tolist()),
+    target_mean=float(train_dataset.target_mean),
+    target_std=float(train_dataset.target_std),
   )
   model = TinyPhysicsNet(model_cfg).to(device)
 
-  optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+  optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay, betas=(0.9, 0.98))
+  total_steps = len(train_loader) * args.epochs
+  warmup_steps = int(args.scheduler_warmup * len(train_loader))
+  min_lr = args.min_lr
+  def lr_lambda(step: int) -> float:
+    if step < warmup_steps:
+      return max(1e-8, (step + 1) / max(1, warmup_steps))
+    decay_steps = max(total_steps - warmup_steps, 1)
+    progress = (step - warmup_steps) / decay_steps
+    cosine = 0.5 * (1 + math.cos(math.pi * progress))
+    return max(min_lr / args.lr, cosine)
+  scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=lr_lambda)
 
   history: List[Dict[str, float]] = []
   best_val_loss = math.inf
@@ -309,12 +424,28 @@ def main() -> None:
 
   for epoch in range(1, args.epochs + 1):
     print(f"\nEpoch {epoch}/{args.epochs}")
-    train_stats = train_epoch(model, train_loader, optimizer, device, args.grad_clip)
+    train_stats = train_epoch(
+      model,
+      train_loader,
+      optimizer,
+      device,
+      args.grad_clip,
+      scheduler,
+      token_centers,
+      args.regression_weight,
+      args.label_smoothing,
+    )
 
     stats_record = {"epoch": epoch, "train_loss": train_stats["loss"], "train_accuracy": train_stats["accuracy"]}
 
     if val_loader is not None:
-      val_stats = evaluate_epoch(model, val_loader, device)
+      val_stats = evaluate_epoch(
+        model,
+        val_loader,
+        device,
+        token_centers,
+        args.regression_weight,
+      )
       stats_record.update({"val_loss": val_stats["loss"], "val_accuracy": val_stats["accuracy"]})
       if val_stats["loss"] < best_val_loss:
         best_val_loss = val_stats["loss"]
