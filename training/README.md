@@ -28,7 +28,6 @@ openpilot logs and train a TinyPhysics surrogate model that is compatible with
      --extract-threads 4 \
      --export-onnx \
      --onnx-path controls_challenge/models/tinyphysics_trained.onnx \
-     --onnx-opset 18
    ```
 
 The command above will:

@@ -4,6 +4,8 @@ import argparse
 import json
 import math
 import numpy as np
+import onnx
+from onnx import numpy_helper
 import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
@@ -94,7 +96,7 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--samples-path", type=str, help="Optional directory cache of extracted segments.")
   parser.add_argument("--write-samples", action="store_true", help="Persist extracted samples to --samples-path after loading.")
   parser.add_argument("--extract-threads", type=int, default=1, help="Number of threads to use for route extraction (>=1).")
-  parser.add_argument("--context", type=int, default=20, help="History length used for autoregressive context.")
+  parser.add_argument("--context", type=int, default=20, help="History length (timesteps) used for autoregressive context.")
   parser.add_argument("--batch-size", type=int, default=256)
   parser.add_argument("--epochs", type=int, default=10)
   parser.add_argument("--lr", type=float, default=3e-4)
@@ -113,6 +115,7 @@ def parse_args() -> argparse.Namespace:
   parser.add_argument("--debug", action="store_true", help="Generate an HTML report plotting each extracted segment.")
   parser.add_argument("--label-smoothing", type=float, default=0.05)
   parser.add_argument("--regression-weight", type=float, default=0.3, help="Weight for auxiliary regression loss.")
+  parser.add_argument("--template-model", type=str, default="./models/tinyphysics.onnx", help="Reference TinyPhysics ONNX used to define the architecture.")
   return parser.parse_args()
 
 
@@ -397,11 +400,8 @@ def main() -> None:
   model_cfg = TinyPhysicsModelConfig(
     state_dim=state_dim,
     context=dataset_cfg.context,
-    vocab_size=dataset_cfg.tokenizer.vocab_size,
-    state_mean=tuple(float(x) for x in train_dataset.state_mean.tolist()),
-    state_std=tuple(float(x) for x in train_dataset.state_std.tolist()),
-    target_mean=float(train_dataset.target_mean),
-    target_std=float(train_dataset.target_std),
+    template_path=args.template_model,
+    load_pretrained=True,
   )
   model = TinyPhysicsNet(model_cfg).to(device)
 
@@ -465,7 +465,7 @@ def main() -> None:
         "context": dataset_cfg.context,
         "tokenizer_vocab_size": dataset_cfg.tokenizer.vocab_size,
         "tokenizer_range": dataset_cfg.tokenizer.value_range,
-        "normalize_states": dataset_cfg.normalize_states,
+        "template_model": args.template_model,
       },
       "dataset_stats": {
         "state_mean": train_dataset.state_mean.tolist(),
@@ -484,16 +484,51 @@ def main() -> None:
 
   if args.export_onnx:
     onnx_path = Path(args.onnx_path).expanduser()
-    export_to_onnx(
-      model,
-      output_path=onnx_path,
-      context_length=model_cfg.context,
-      state_dim=model_cfg.state_dim,
-      vocab_size=model_cfg.vocab_size,
-      opset=args.onnx_opset,
-    )
-    print(f"Exported ONNX model to {onnx_path}")
+    template_path = Path(args.template_model).expanduser()
+    template_copy_path = onnx_path.with_name(onnx_path.stem + "_template.onnx")
+    if template_path.exists():
+      if template_copy_path.resolve() != template_path.resolve():
+        template_copy_path.parent.mkdir(parents=True, exist_ok=True)
+        template_copy_path.write_bytes(template_path.read_bytes())
+        print(f"Saved reference template to {template_copy_path}")
+      try:
+        updated = save_template_with_weights(template_path, onnx_path, model.state_dict())
+        print(f"Updated {updated} initializers in {onnx_path}")
+        export_success = True
+      except Exception as exc:
+        print(f"Failed to update template ONNX ({exc}), falling back to torch export")
+        export_success = False
+    else:
+      print(f"Template model not found at {template_path}, falling back to torch export")
+      export_success = False
+
+    if not 'export_success' in locals() or not export_success:
+      export_to_onnx(
+        model,
+        output_path=onnx_path,
+        context_length=model_cfg.context,
+        state_dim=state_dim,
+        vocab_size=dataset_cfg.tokenizer.vocab_size,
+        opset=args.onnx_opset,
+      )
+      print(f"Exported ONNX model to {onnx_path}")
 
 
 if __name__ == "__main__":
   main()
+def save_template_with_weights(template_path: Path, output_path: Path, state_dict: dict[str, torch.Tensor]) -> int:
+  model = onnx.load(template_path)
+  initializer_map = {init.name: init for init in model.graph.initializer}
+  updated = 0
+  for name, tensor in state_dict.items():
+    if not name.startswith("backbone.initializers."):
+      continue
+    init_name = name.split("backbone.initializers.", 1)[1]
+    if init_name in initializer_map:
+      initializer_map[init_name].CopyFrom(numpy_helper.from_array(tensor.detach().cpu().numpy(), name=init_name))
+      updated += 1
+  if updated == 0:
+    raise ValueError("No matching initializers were updated in the template ONNX")
+  output_path.parent.mkdir(parents=True, exist_ok=True)
+  onnx.save(model, output_path)
+  return updated

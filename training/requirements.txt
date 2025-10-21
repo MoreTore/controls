@@ -1,3 +1,6 @@
 torch>=2.1
 onnxscript
 pyarrow
+onnx>=1.14
+onnxruntime
+onnx2torch
