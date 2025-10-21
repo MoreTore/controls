@@ -53,13 +53,13 @@ Each rollout will result in 2 costs:
 It is important to minimize both costs. `total_cost`: $(\mathrm{lat{\textunderscore}accel{\textunderscore}cost} * 50) + \mathrm{jerk{\textunderscore}cost}$
 
 ## Training (experimental)
-There is an experimental training pipeline under `controls_challenge/training/` that
+There is an experimental training pipeline under `training/` that
 demonstrates how to:
 - stream openpilot routes with `LogReader`,
 - extract TinyPhysics-style sequences, and
 - train/ export a model that can be evaluated with `tinyphysics.py`.
 
-See `controls_challenge/training/README.md` for setup and usage details.
+See `training/README.md` for setup and usage details.
 
 ## Submission
 Run the following command, then submit `report.html` and your code to [this form](https://forms.gle/US88Hg7UR6bBuW3BA).
