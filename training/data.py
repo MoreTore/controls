@@ -14,7 +14,7 @@ from openpilot.tools.lib.logreader import LogReader, ReadMode
 
 ACC_G = 9.81
 SEGMENT_LENGTH_NS = int(60 * 1e9)  # one minute per segment
-CSV_COLUMNS = ("t", "vEgo", "aEgo", "roll", "targetLateralAcceleration", "steerCommand", "actualLateralAcceleration")
+CSV_COLUMNS = ("t", "vEgo", "aEgo", "roll", "targetLateralAcceleration", "steerCommand", "actualLateralAcceleration", "steeringTorque")
 MIN_SEGMENT_ROWS = 200
 
 
@@ -93,12 +93,14 @@ class TinyPhysicsLogExtractor:
       "actual_lataccel": _Signal(),
       "torque_active": _Signal(),
       "steering_pressed": _Signal(),
+      "driver_torque": _Signal(),
     }
 
     try:
       lr = LogReader(route_or_segment, default_mode=ReadMode.QLOG, sort_by_time=sort_by_time)
-    except Exception as exc:
-      raise RuntimeError(f"Failed to read log for {route_or_segment}") from exc
+    except Exception as e:
+      print(e)
+      return
 
     segments: List[SegmentSamples] = []
     base_time_ns: Optional[int] = None
@@ -152,6 +154,7 @@ class TinyPhysicsLogExtractor:
         buffers["v_ego"].update(car_state.vEgo, msg_time)
         buffers["a_ego"].update(car_state.aEgo, msg_time)
         buffers["steering_pressed"].update(float(car_state.steeringPressed), msg_time)
+        buffers["driver_torque"].update(car_state.steeringTorque, msg_time)
 
         if segment_start_time is None:
           segment_start_time = msg_time
@@ -172,6 +175,7 @@ class TinyPhysicsLogExtractor:
             "targetLateralAcceleration": float(buffers["target_lataccel"].value),
             "steerCommand": float(buffers["steer_command"].value),
             "actualLateralAcceleration": float(buffers["actual_lataccel"].value),
+            "steeringTorque": float(buffers["driver_torque"].value),
           })
 
       elif which == "carControl":
@@ -218,7 +222,7 @@ class TinyPhysicsLogExtractor:
     return segments
 
   def _signals_ready(self, buffers: dict[str, _Signal], current_time: float) -> bool:
-    required_keys = ("v_ego", "a_ego", "roll", "steer_command", "target_lataccel", "actual_lataccel", "torque_active", "steering_pressed")
+    required_keys = ("v_ego", "a_ego", "roll", "steer_command", "target_lataccel", "actual_lataccel", "torque_active", "steering_pressed", "driver_torque")
     return all(buffers[key].fresh(current_time, self.max_signal_age) for key in required_keys)
 
 

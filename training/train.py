@@ -49,10 +49,11 @@ def generate_debug_report(segments: List[SegmentSamples], report_path: Path, max
     target = frame["targetLateralAcceleration"].to_numpy()
     actual = frame.get("actualLateralAcceleration", target).to_numpy()
     steer = frame["steerCommand"].to_numpy()
+    driver = frame.get("steeringTorque").to_numpy()
     v_ego = frame["vEgo"].to_numpy()
     roll = frame["roll"].to_numpy()
 
-    fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True)
+    fig, axes = plt.subplots(5, 1, figsize=(10, 8), sharex=True)
     axes[0].plot(t, target, label="Target Lat Accel", color="#1f77b4")
     axes[0].plot(t, actual, label="Actual Lat Accel", color="#ff7f0e", alpha=0.8)
     axes[0].set_ylabel("m/s²")
@@ -63,14 +64,18 @@ def generate_debug_report(segments: List[SegmentSamples], report_path: Path, max
     axes[1].set_ylabel("Steer Cmd")
     axes[1].grid(True, alpha=0.3)
 
-    axes[2].plot(t, v_ego, color="#d62728")
-    axes[2].set_ylabel("vEgo (m/s)")
+    axes[2].plot(t, driver, color="#2ca02c")
+    axes[2].set_ylabel("Driver Torque")
     axes[2].grid(True, alpha=0.3)
 
-    axes[3].plot(t, roll, color="#9467bd")
-    axes[3].set_ylabel("Roll (rad)")
-    axes[3].set_xlabel("Time (s)")
+    axes[3].plot(t, v_ego, color="#d62728")
+    axes[3].set_ylabel("vEgo (m/s)")
     axes[3].grid(True, alpha=0.3)
+
+    axes[4].plot(t, roll, color="#9467bd")
+    axes[4].set_ylabel("Roll (rad)")
+    axes[4].set_xlabel("Time (s)")
+    axes[4].grid(True, alpha=0.3)
 
     plt.tight_layout()
     buffer = BytesIO()
@@ -160,6 +165,8 @@ def fetch_routes_for_dongles(dongle_ids: List[str], *, limit: Optional[int], git
       for route in routes:
         fullname = route.get("fullname")
         if not fullname:
+          continue
+        if route.get("segment_numbers")[0] != 0:
           continue
         commit = (route.get("git_commit") or "").lower()
         if commit_filter and commit not in commit_filter:
@@ -516,6 +523,7 @@ def main() -> None:
 
 if __name__ == "__main__":
   main()
+
 def save_template_with_weights(template_path: Path, output_path: Path, state_dict: dict[str, torch.Tensor]) -> int:
   model = onnx.load(template_path)
   initializer_map = {init.name: init for init in model.graph.initializer}
